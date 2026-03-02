@@ -1,0 +1,1032 @@
+import { useState, useEffect } from "react";
+
+const PENALTY_POOL = [
+  "Complete DOUBLE your normal workout — no excuses, Hunter.",
+  "Run 5km penalty sprint before anything else.",
+  "100 pushups + 100 situps + 100 squats. Begin.",
+  "4-hour deep focus study session — phone locked.",
+  "Complete all missed quests + 50% bonus reps.",
+  "Cold shower + 2x full body workout. Weakness is unacceptable.",
+];
+
+const TODAY = () => new Date().toISOString().split("T")[0];
+
+const formatDate = (d) => {
+  const dt = new Date(d);
+  return `${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}/${dt.getFullYear()}`;
+};
+
+const loadData = async (key, def) => {
+  try {
+    const r = await window.storage.get(key);
+    return r ? JSON.parse(r.value) : def;
+  } catch {
+    return def;
+  }
+};
+
+const saveData = async (key, val) => {
+  try {
+    await window.storage.set(key, JSON.stringify(val));
+  } catch {}
+};
+
+const DEFAULT_LISTS = [
+  {
+    id: "default",
+    name: "⚔️ Default Quests",
+    quests: [
+      { id: "d1", text: "Drink 2L of water", completed: false, completedDate: null },
+      { id: "d2", text: "Sleep before midnight", completed: false, completedDate: null },
+    ],
+  },
+  {
+    id: "workout",
+    name: "💪 Today Workout Quests",
+    quests: [
+      { id: "w1", text: "20 Pushups", completed: false, completedDate: null },
+      { id: "w2", text: "20 Situps", completed: false, completedDate: null },
+      { id: "w3", text: "20 Squats", completed: false, completedDate: null },
+      { id: "w4", text: "5km Run", completed: false, completedDate: null },
+    ],
+  },
+  {
+    id: "study",
+    name: "📚 Today Study Quests",
+    quests: [],
+  },
+];
+
+const getRank = (lv) => {
+  if (lv < 5) return { rank: "E", label: "E-Rank Hunter", color: "#94a3b8" };
+  if (lv < 10) return { rank: "D", label: "D-Rank Hunter", color: "#4ade80" };
+  if (lv < 15) return { rank: "C", label: "C-Rank Hunter", color: "#60a5fa" };
+  if (lv < 20) return { rank: "B", label: "B-Rank Hunter", color: "#a78bfa" };
+  if (lv < 30) return { rank: "A", label: "A-Rank Hunter", color: "#f97316" };
+  return { rank: "S", label: "S-Rank Hunter", color: "#fbbf24" };
+};
+
+const getXPNeeded = (lv) => lv * 100;
+
+export default function SoloLevelingApp() {
+  const [lists, setLists] = useState(null);
+  const [finished, setFinished] = useState([]);
+  const [checkIns, setCheckIns] = useState({});
+  const [lv, setLv] = useState({ level: 1, xp: 0, totalDays: 0 });
+  const [penalties, setPenalties] = useState([]);
+  const [selectedList, setSelectedList] = useState("workout");
+  const [view, setView] = useState("quests");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [newQuestText, setNewQuestText] = useState("");
+  const [newListName, setNewListName] = useState("");
+  const [showAddList, setShowAddList] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [notif, setNotif] = useState(null);
+  const [levelUpAnim, setLevelUpAnim] = useState(false);
+  const [editingListId, setEditingListId] = useState(null);
+  const [editListName, setEditListName] = useState("");
+  const [editPenaltyId, setEditPenaltyId] = useState(null);
+  const [editPenaltyText, setEditPenaltyText] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const ql = await loadData("sl-lists", DEFAULT_LISTS);
+      const fin = await loadData("sl-finished", []);
+      const ci = await loadData("sl-checkins", {});
+      const lvd = await loadData("sl-level", { level: 1, xp: 0, totalDays: 0 });
+      const pen = await loadData("sl-penalties", []);
+      setLists(ql);
+      setFinished(fin);
+      setCheckIns(ci);
+      setLv(lvd);
+      setPenalties(pen);
+      setLoaded(true);
+    })();
+  }, []);
+
+  // Auto-check penalty for yesterday
+  useEffect(() => {
+    if (!loaded) return;
+    const yest = new Date();
+    yest.setDate(yest.getDate() - 1);
+    const yStr = yest.toISOString().split("T")[0];
+    if (checkIns[yStr] === false && !penalties.some((p) => p.missedDate === yStr)) {
+      addPenaltyForDate(yStr, penalties);
+    }
+  }, [loaded]);
+
+  const addPenaltyForDate = (date, currentPens) => {
+    const pen = {
+      id: Date.now().toString(),
+      missedDate: date,
+      quest: PENALTY_POOL[Math.floor(Math.random() * PENALTY_POOL.length)],
+      completed: false,
+    };
+    const newPens = [...currentPens, pen];
+    setPenalties(newPens);
+    saveData("sl-penalties", newPens);
+  };
+
+  const showNotif = (msg, type = "info") => {
+    setNotif({ msg, type });
+    setTimeout(() => setNotif(null), 3500);
+  };
+
+  const completeQuest = (listId, questId) => {
+    const today = TODAY();
+    const list = lists.find((l) => l.id === listId);
+    const quest = list?.quests.find((q) => q.id === questId);
+    if (!quest) return;
+
+    const newLists = lists.map((l) =>
+      l.id !== listId ? l : { ...l, quests: l.quests.filter((q) => q.id !== questId) }
+    );
+    const completedQ = { ...quest, completed: true, completedDate: today, fromList: listId, fromListName: list.name };
+    const newFinished = [...finished, completedQ];
+
+    let xpGain = 10;
+    let newCheckIns = { ...checkIns };
+    let newTotalDays = lv.totalDays;
+    let checkedInToday = false;
+
+    if (!newCheckIns[today]) {
+      newCheckIns[today] = true;
+      newTotalDays += 1;
+      xpGain += 50;
+      checkedInToday = true;
+    }
+
+    let newXP = lv.xp + xpGain;
+    let newLevel = lv.level;
+    let didLevelUp = false;
+
+    while (newXP >= getXPNeeded(newLevel)) {
+      newXP -= getXPNeeded(newLevel);
+      newLevel += 1;
+      didLevelUp = true;
+    }
+
+    const newLvData = { level: newLevel, xp: newXP, totalDays: newTotalDays };
+
+    setLists(newLists);
+    setFinished(newFinished);
+    setCheckIns(newCheckIns);
+    setLv(newLvData);
+    saveData("sl-lists", newLists);
+    saveData("sl-finished", newFinished);
+    saveData("sl-checkins", newCheckIns);
+    saveData("sl-level", newLvData);
+
+    if (didLevelUp) {
+      setLevelUpAnim(true);
+      setTimeout(() => setLevelUpAnim(false), 3000);
+      showNotif(`🎉 LEVEL UP! You are now LEVEL ${newLevel}!`, "levelup");
+    } else if (checkedInToday) {
+      showNotif(`✔ Quest Complete! +60 XP | Check-In Recorded for ${formatDate(today)}`, "success");
+    } else {
+      showNotif(`✔ Quest Complete! +10 XP`, "success");
+    }
+  };
+
+  const addQuest = () => {
+    if (!newQuestText.trim()) return;
+    const q = { id: Date.now().toString(), text: newQuestText.trim(), completed: false, completedDate: null };
+    const newLists = lists.map((l) => l.id === selectedList ? { ...l, quests: [...l.quests, q] } : l);
+    setLists(newLists);
+    saveData("sl-lists", newLists);
+    setNewQuestText("");
+  };
+
+  const deleteQuest = (listId, questId) => {
+    const newLists = lists.map((l) => l.id !== listId ? l : { ...l, quests: l.quests.filter((q) => q.id !== questId) });
+    setLists(newLists);
+    saveData("sl-lists", newLists);
+  };
+
+  const addList = () => {
+    if (!newListName.trim()) return;
+    const list = { id: Date.now().toString(), name: newListName.trim(), quests: [] };
+    const newLists = [...lists, list];
+    setLists(newLists);
+    saveData("sl-lists", newLists);
+    setNewListName("");
+    setShowAddList(false);
+    setSelectedList(list.id);
+    setView("quests");
+  };
+
+  const deleteList = (listId) => {
+    if (listId === "default") return;
+    const newLists = lists.filter((l) => l.id !== listId);
+    setLists(newLists);
+    saveData("sl-lists", newLists);
+    setSelectedList(newLists[0]?.id || "default");
+  };
+
+  const saveListName = (listId) => {
+    if (!editListName.trim()) { setEditingListId(null); return; }
+    const newLists = lists.map((l) => l.id === listId ? { ...l, name: editListName.trim() } : l);
+    setLists(newLists);
+    saveData("sl-lists", newLists);
+    setEditingListId(null);
+  };
+
+  const completePenalty = (penId) => {
+    const newPens = penalties.map((p) => p.id === penId ? { ...p, completed: true } : p);
+    setPenalties(newPens);
+    saveData("sl-penalties", newPens);
+    const newXP = lv.xp + 100;
+    const newLvData = { ...lv, xp: newXP };
+    setLv(newLvData);
+    saveData("sl-level", newLvData);
+    showNotif("⚡ Penalty Complete! +100 XP — XP Unlocked!", "success");
+  };
+
+  const savePenaltyEdit = (penId) => {
+    if (!editPenaltyText.trim()) { setEditPenaltyId(null); return; }
+    const newPens = penalties.map((p) => p.id === penId ? { ...p, quest: editPenaltyText.trim() } : p);
+    setPenalties(newPens);
+    saveData("sl-penalties", newPens);
+    setEditPenaltyId(null);
+  };
+
+  const getHistory = () => {
+    const days = [];
+    const today = new Date();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const dStr = d.toISOString().split("T")[0];
+      days.push({
+        date: dStr,
+        label: `D${30 - i}`,
+        checked: checkIns[dStr] === true,
+        isToday: i === 0,
+        isPast: i > 0 && checkIns[dStr] === undefined,
+      });
+    }
+    return days;
+  };
+
+  if (!loaded) {
+    return (
+      <div style={S.app}>
+        <div style={S.bootScreen}>
+          <div style={S.bootLogo}>⬡</div>
+          <div style={S.bootText}>SYSTEM INITIALIZING...</div>
+          <div style={S.bootBar}><div style={S.bootBarFill}></div></div>
+        </div>
+        <style>{CSS}</style>
+      </div>
+    );
+  }
+
+  const curList = lists?.find((l) => l.id === selectedList);
+  const history = getHistory();
+  const pendingPens = penalties.filter((p) => !p.completed);
+  const xpPct = Math.min(100, Math.round((lv.xp / getXPNeeded(lv.level)) * 100));
+  const rankInfo = getRank(lv.level);
+
+  return (
+    <div style={S.app} onClick={() => moreOpen && setMoreOpen(false)}>
+      <style>{CSS}</style>
+
+      {/* Ambient particles */}
+      <div style={S.particles}>
+        {[...Array(6)].map((_, i) => <div key={i} className={`particle particle-${i}`} />)}
+      </div>
+
+      {/* Level Up Overlay */}
+      {levelUpAnim && (
+        <div style={S.levelUpOverlay}>
+          <div style={S.levelUpBox}>
+            <div style={S.levelUpStar}>★</div>
+            <div style={S.levelUpTitle}>LEVEL UP</div>
+            <div style={S.levelUpNum}>LV. {lv.level}</div>
+            <div style={S.levelUpRank}>{rankInfo.label}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Notification */}
+      {notif && (
+        <div className="notif-slide" style={{ ...S.notif, ...(notif.type === "levelup" ? S.notifLevelup : notif.type === "success" ? S.notifSuccess : {}) }}>
+          {notif.msg}
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={S.header}>
+        <div style={S.headerLeft}>
+          <div style={S.hexIcon}>⬡</div>
+          <div>
+            <div style={S.sysLabel}>SYSTEM INTERFACE</div>
+            <div style={S.appTitle}>SOLO QUEST</div>
+          </div>
+        </div>
+        <div style={S.headerRight}>
+          <div style={S.xpMiniBar}>
+            <div style={{ ...S.xpMiniFill, width: `${xpPct}%` }} />
+          </div>
+          <div style={{ ...S.rankBadge, borderColor: rankInfo.color, color: rankInfo.color }}>
+            {rankInfo.rank}
+          </div>
+          <div style={S.lvBadge}>LV.{lv.level}</div>
+          <button style={S.moreBtn} onClick={(e) => { e.stopPropagation(); setMoreOpen(!moreOpen); }} className="more-btn">
+            {moreOpen ? "✕" : "☰"}
+          </button>
+        </div>
+      </div>
+
+      {/* Dropdown More Menu */}
+      {moreOpen && (
+        <div style={S.moreMenu} onClick={(e) => e.stopPropagation()}>
+          <div style={S.moreMenuTitle}>── SYSTEM MENU ──</div>
+          <button style={S.moreItem} className="more-item" onClick={() => { setView("checkin"); setMoreOpen(false); }}>
+            <span style={S.moreIcon}>📅</span>
+            <div>
+              <div style={S.moreItemLabel}>Daily Check-In</div>
+              <div style={S.moreItemSub}>Total: {lv.totalDays} days active</div>
+            </div>
+          </button>
+          <button style={S.moreItem} className="more-item" onClick={() => { setView("level"); setMoreOpen(false); }}>
+            <span style={S.moreIcon}>⚡</span>
+            <div>
+              <div style={S.moreItemLabel}>Level Progress</div>
+              <div style={S.moreItemSub}>{rankInfo.label} · {xpPct}% to next level</div>
+            </div>
+          </button>
+          <button
+            style={{ ...S.moreItem, ...(pendingPens.length > 0 ? S.moreItemPenalty : {}) }}
+            className="more-item"
+            onClick={() => { setView("penalties"); setMoreOpen(false); }}>
+            <span style={S.moreIcon}>💀</span>
+            <div>
+              <div style={S.moreItemLabel}>Penalty Quests {pendingPens.length > 0 ? `(${pendingPens.length} ACTIVE)` : ""}</div>
+              <div style={S.moreItemSub}>{pendingPens.length > 0 ? "⚠ XP LOCKED — Complete penalties" : "No active penalties"}</div>
+            </div>
+          </button>
+        </div>
+      )}
+
+      {/* Body */}
+      <div style={S.body}>
+        {/* Sidebar */}
+        <div style={S.sidebar}>
+          <div style={S.sidebarHead}>QUEST LISTS</div>
+
+          {lists?.map((list) => (
+            <div key={list.id}>
+              {editingListId === list.id ? (
+                <div style={S.editListRow}>
+                  <input
+                    style={S.editListInput}
+                    value={editListName}
+                    onChange={(e) => setEditListName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveListName(list.id); if (e.key === "Escape") setEditingListId(null); }}
+                    autoFocus
+                  />
+                  <button style={S.editSaveBtn} onClick={() => saveListName(list.id)}>✔</button>
+                </div>
+              ) : (
+                <div
+                  style={{ ...S.listItem, ...(selectedList === list.id && view === "quests" ? S.listItemActive : {}) }}
+                  className="list-item"
+                  onClick={() => { setSelectedList(list.id); setView("quests"); }}>
+                  <span style={S.listItemText}>{list.name}</span>
+                  <div style={S.listItemRight}>
+                    <span style={S.listCount}>{list.quests.length}</span>
+                    <button style={S.listEditBtn} className="list-edit-btn"
+                      onClick={(e) => { e.stopPropagation(); setEditingListId(list.id); setEditListName(list.name); }}>✎</button>
+                    {list.id !== "default" && (
+                      <button style={S.listDelBtn} className="list-edit-btn"
+                        onClick={(e) => { e.stopPropagation(); deleteList(list.id); }}>✕</button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+
+          <div
+            style={{ ...S.listItem, ...(view === "finished" ? S.listItemActive : {}) }}
+            className="list-item"
+            onClick={() => setView("finished")}>
+            <span style={S.listItemText}>✅ Finished Quests</span>
+            <span style={S.listCount}>{finished.length}</span>
+          </div>
+
+          <div style={S.sidebarDivider} />
+
+          {showAddList ? (
+            <div style={S.addListForm}>
+              <input
+                style={S.addListInput}
+                value={newListName}
+                onChange={(e) => setNewListName(e.target.value)}
+                placeholder="Quest list name..."
+                onKeyDown={(e) => { if (e.key === "Enter") addList(); if (e.key === "Escape") setShowAddList(false); }}
+                autoFocus
+              />
+              <div style={{ display: "flex", gap: 4 }}>
+                <button style={S.addListConfirm} onClick={addList}>CREATE</button>
+                <button style={S.addListCancel} onClick={() => setShowAddList(false)}>✕</button>
+              </div>
+            </div>
+          ) : (
+            <button style={S.newListBtn} className="new-list-btn" onClick={() => setShowAddList(true)}>
+              + New Quest List
+            </button>
+          )}
+        </div>
+
+        {/* Main Panel */}
+        <div style={S.panel}>
+
+          {/* QUESTS VIEW */}
+          {view === "quests" && curList && (
+            <div style={S.panelInner}>
+              <div style={S.panelHeader}>
+                <div style={S.panelCorner} />
+                <div style={S.panelTitle}>{curList.name}</div>
+                <div style={S.panelSubtitle}>{curList.quests.length} QUEST{curList.quests.length !== 1 ? "S" : ""} ASSIGNED</div>
+              </div>
+
+              <div style={S.questList}>
+                {curList.quests.length === 0 && (
+                  <div style={S.empty}>
+                    <div style={S.emptyIcon}>⚔</div>
+                    <div style={S.emptyTitle}>NO QUESTS ASSIGNED</div>
+                    <div style={S.emptySub}>Add a quest below to begin your journey.</div>
+                  </div>
+                )}
+                {curList.quests.map((q, i) => (
+                  <div key={q.id} style={S.questRow} className="quest-row">
+                    <div style={S.questNum}>{String(i + 1).padStart(2, "0")}</div>
+                    <button style={S.checkBtn} className="check-btn" onClick={() => completeQuest(curList.id, q.id)}>
+                      <div style={S.checkInner} />
+                    </button>
+                    <span style={S.questLabel}>{q.text}</span>
+                    <button style={S.delQBtn} className="del-q-btn" onClick={() => deleteQuest(curList.id, q.id)}>✕</button>
+                  </div>
+                ))}
+              </div>
+
+              <div style={S.addQuestRow}>
+                <div style={S.addQuestInputWrap}>
+                  <span style={S.addQuestPlus}>▷</span>
+                  <input
+                    style={S.addQuestInput}
+                    value={newQuestText}
+                    onChange={(e) => setNewQuestText(e.target.value)}
+                    placeholder="Enter new quest..."
+                    onKeyDown={(e) => e.key === "Enter" && addQuest()}
+                  />
+                </div>
+                <button style={S.addQuestBtn} className="add-quest-btn" onClick={addQuest}>＋ ADD QUEST</button>
+              </div>
+            </div>
+          )}
+
+          {/* FINISHED VIEW */}
+          {view === "finished" && (
+            <div style={S.panelInner}>
+              <div style={S.panelHeader}>
+                <div style={S.panelCorner} />
+                <div style={S.panelTitle}>✅ Finished Quests</div>
+                <div style={S.panelSubtitle}>{finished.length} COMPLETED</div>
+              </div>
+              <div style={S.questList}>
+                {finished.length === 0 && (
+                  <div style={S.empty}>
+                    <div style={S.emptyIcon}>🏆</div>
+                    <div style={S.emptyTitle}>NO COMPLETED QUESTS YET</div>
+                    <div style={S.emptySub}>Complete quests to see them here.</div>
+                  </div>
+                )}
+                {[...finished].reverse().map((q, i) => (
+                  <div key={q.id + i} style={{ ...S.questRow, opacity: 0.75 }}>
+                    <span style={S.completedCheck}>✔</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ ...S.questLabel, textDecoration: "line-through", color: "#6b8fa8" }}>{q.text}</div>
+                      <div style={S.completedMeta}>{q.fromListName} · {formatDate(q.completedDate)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* CHECK-IN VIEW */}
+          {view === "checkin" && (
+            <div style={S.panelInner}>
+              <div style={S.panelHeader}>
+                <div style={S.panelCorner} />
+                <div style={S.panelTitle}>📅 Daily Check-In</div>
+                <div style={S.panelSubtitle}>CHECK-IN HISTORY · LAST 30 DAYS</div>
+              </div>
+              <div style={S.streakRow}>
+                <div style={S.streakCard}>
+                  <div style={S.streakNum}>{lv.totalDays}</div>
+                  <div style={S.streakLabel}>DAYS ACTIVE</div>
+                </div>
+                <div style={S.streakCard}>
+                  <div style={{ ...S.streakNum, color: "#f97316" }}>{pendingPens.length}</div>
+                  <div style={S.streakLabel}>PENALTIES</div>
+                </div>
+                <div style={S.streakCard}>
+                  <div style={{ ...S.streakNum, color: rankInfo.color }}>{lv.level}</div>
+                  <div style={S.streakLabel}>LEVEL</div>
+                </div>
+              </div>
+              <div style={S.ciNote}>Check-in is automatically recorded when you complete at least one quest.</div>
+              <div style={S.histGrid}>
+                {history.map((day, i) => (
+                  <div
+                    key={day.date}
+                    style={{
+                      ...S.dayCell,
+                      ...(day.checked ? S.dayCellOn : {}),
+                      ...(day.isToday ? S.dayCellToday : {}),
+                      ...(!day.checked && !day.isToday && !day.isPast ? S.dayCellMiss : {}),
+                    }}>
+                    <div style={S.dayLabel}>{day.label}</div>
+                    <div style={S.dayIcon}>{day.checked ? "✔️" : day.isToday ? "◉" : day.isPast ? "–" : "❎"}</div>
+                    <div style={S.dayDate}>{day.date.slice(5)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* LEVEL VIEW */}
+          {view === "level" && (
+            <div style={S.panelInner}>
+              <div style={S.panelHeader}>
+                <div style={S.panelCorner} />
+                <div style={S.panelTitle}>⚡ Level Progress</div>
+                <div style={S.panelSubtitle}>HUNTER STATUS BOARD</div>
+              </div>
+              <div style={S.profileCard}>
+                <div style={{ ...S.rankCircle, borderColor: rankInfo.color, boxShadow: `0 0 24px ${rankInfo.color}55` }}>
+                  <div style={{ ...S.rankLetter, color: rankInfo.color }}>{rankInfo.rank}</div>
+                </div>
+                <div style={S.profileInfo}>
+                  <div style={{ ...S.profileRankLabel, color: rankInfo.color }}>{rankInfo.label}</div>
+                  <div style={S.profileLevel}>LEVEL {lv.level}</div>
+                  <div style={S.xpBarOuter}>
+                    <div style={{ ...S.xpBarInner, width: `${xpPct}%`, background: rankInfo.color }} />
+                    <div style={S.xpBarGlow} />
+                  </div>
+                  <div style={S.xpNums}>{lv.xp} / {getXPNeeded(lv.level)} XP — {xpPct}%</div>
+                </div>
+              </div>
+
+              <div style={S.roadmapTitle}>── LEVELING ROADMAP ──</div>
+              {[
+                { range: "LV 1–5", label: "The 7-Day Sprint", desc: "7 days of daily check-ins per level", color: "#4ade80", current: lv.level <= 5 },
+                { range: "LV 6–15", label: "The 15-Day Grind", desc: "15 days of daily check-ins per level", color: "#facc15", current: lv.level > 5 && lv.level <= 15 },
+                { range: "LV 16+", label: "The 30-Day Mastery", desc: "30 days of daily check-ins per level", color: "#f97316", current: lv.level > 15 },
+              ].map((r) => (
+                <div key={r.range} style={{ ...S.roadItem, ...(r.current ? { ...S.roadItemActive, borderLeftColor: r.color } : {}) }}>
+                  <div style={{ ...S.roadBadge, color: r.color, borderColor: r.color }}>{r.range}</div>
+                  <div style={S.roadInfo}>
+                    <div style={S.roadLabel}>{r.label} {r.current && <span style={S.roadCurrent}>◀ YOU ARE HERE</span>}</div>
+                    <div style={S.roadDesc}>{r.desc}</div>
+                  </div>
+                </div>
+              ))}
+
+              <div style={S.xpGuide}>
+                <div style={S.xpGuideTitle}>XP GUIDE</div>
+                <div style={S.xpGuideRow}><span style={{ color: "#00d4ff" }}>Quest Complete</span><span>+10 XP</span></div>
+                <div style={S.xpGuideRow}><span style={{ color: "#00d4ff" }}>Daily Check-In Bonus</span><span>+50 XP</span></div>
+                <div style={S.xpGuideRow}><span style={{ color: "#f97316" }}>Penalty Quest Complete</span><span>+100 XP</span></div>
+              </div>
+            </div>
+          )}
+
+          {/* PENALTIES VIEW */}
+          {view === "penalties" && (
+            <div style={S.panelInner}>
+              <div style={S.panelHeader}>
+                <div style={S.panelCorner} />
+                <div style={S.panelTitle}>💀 Penalty Quests</div>
+                <div style={S.panelSubtitle}>{pendingPens.length} ACTIVE PENALTIES</div>
+              </div>
+
+              {pendingPens.length > 0 && (
+                <div style={S.penaltyWarning}>
+                  ⚠ XP LOCKED — You missed a day. Complete all penalty quests to restore XP gain.
+                </div>
+              )}
+
+              {penalties.length === 0 && (
+                <div style={S.empty}>
+                  <div style={S.emptyIcon}>🛡</div>
+                  <div style={S.emptyTitle}>NO PENALTIES</div>
+                  <div style={S.emptySub}>Stay consistent. Don't let this list grow.</div>
+                </div>
+              )}
+
+              {penalties.map((p) => (
+                <div key={p.id} style={{ ...S.penCard, ...(p.completed ? S.penCardDone : {}) }}>
+                  <div style={S.penDateRow}>
+                    <span style={S.penDate}>Missed: {formatDate(p.missedDate)}</span>
+                    {!p.completed && (
+                      <button style={S.penEditBtn} onClick={() => { setEditPenaltyId(p.id); setEditPenaltyText(p.quest); }}>✎ Edit</button>
+                    )}
+                  </div>
+                  {editPenaltyId === p.id ? (
+                    <div style={S.penEditRow}>
+                      <input style={S.penEditInput} value={editPenaltyText}
+                        onChange={(e) => setEditPenaltyText(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") savePenaltyEdit(p.id); if (e.key === "Escape") setEditPenaltyId(null); }} autoFocus />
+                      <button style={S.penEditSave} onClick={() => savePenaltyEdit(p.id)}>✔ Save</button>
+                    </div>
+                  ) : (
+                    <div style={S.penQuest}>{p.quest}</div>
+                  )}
+                  {!p.completed ? (
+                    <button style={S.penCompleteBtn} className="pen-complete-btn" onClick={() => completePenalty(p.id)}>
+                      MARK COMPLETE ✔
+                    </button>
+                  ) : (
+                    <div style={S.penDoneLabel}>✔ PENALTY CLEARED — XP Restored</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { margin: 0; background: #020408; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #060b14; }
+  ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 2px; }
+
+  .particle { position: absolute; border-radius: 50%; pointer-events: none; opacity: 0.15; animation: float linear infinite; }
+  .particle-0 { width:2px;height:2px;background:#00d4ff;top:10%;left:15%;animation-duration:8s;animation-delay:0s; }
+  .particle-1 { width:1px;height:1px;background:#7c3aed;top:30%;left:70%;animation-duration:12s;animation-delay:-3s; }
+  .particle-2 { width:2px;height:2px;background:#00d4ff;top:60%;left:40%;animation-duration:10s;animation-delay:-5s; }
+  .particle-3 { width:1px;height:1px;background:#a78bfa;top:80%;left:85%;animation-duration:9s;animation-delay:-2s; }
+  .particle-4 { width:2px;height:2px;background:#00d4ff;top:20%;left:90%;animation-duration:11s;animation-delay:-7s; }
+  .particle-5 { width:1px;height:1px;background:#7c3aed;top:70%;left:5%;animation-duration:13s;animation-delay:-4s; }
+
+  @keyframes float {
+    0% { transform: translateY(0px) translateX(0px); opacity: 0; }
+    10% { opacity: 0.3; }
+    90% { opacity: 0.3; }
+    100% { transform: translateY(-80px) translateX(30px); opacity: 0; }
+  }
+  @keyframes boot-pulse { 0%,100%{opacity:0.6} 50%{opacity:1} }
+  @keyframes boot-fill { 0%{width:0%} 100%{width:100%} }
+  @keyframes notif-slide { from{opacity:0;transform:translateY(-16px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes levelup-in { 0%{opacity:0;transform:scale(0.7)} 20%{opacity:1;transform:scale(1.1)} 30%{transform:scale(1)} 80%{opacity:1} 100%{opacity:0} }
+  @keyframes star-spin { 0%{transform:rotate(0deg) scale(1)} 50%{transform:rotate(180deg) scale(1.3)} 100%{transform:rotate(360deg) scale(1)} }
+  @keyframes glow-pulse { 0%,100%{box-shadow:0 0 8px #00d4ff33} 50%{box-shadow:0 0 20px #00d4ff77} }
+  @keyframes xp-fill { from{width:0%} to{width:var(--xp-w)} }
+
+  .notif-slide { animation: notif-slide 0.3s ease forwards; }
+
+  .more-btn:hover { background: #0a2040 !important; color: #00d4ff !important; }
+  .more-item:hover { background: rgba(0,212,255,0.06) !important; }
+  .list-item:hover { background: rgba(0,212,255,0.05) !important; border-left-color: #00d4ff55 !important; }
+  .list-edit-btn:hover { color: #00d4ff !important; }
+  .quest-row:hover { background: rgba(0,212,255,0.04) !important; border-color: #1e3a5f !important; }
+  .check-btn:hover { border-color: #00d4ff !important; box-shadow: 0 0 12px #00d4ff55 !important; }
+  .del-q-btn:hover { color: #f87171 !important; }
+  .add-quest-btn:hover { background: #00b8d9 !important; box-shadow: 0 0 16px #00d4ff66 !important; }
+  .new-list-btn:hover { border-color: #00d4ff88 !important; color: #00d4ff !important; }
+  .pen-complete-btn:hover { background: rgba(0,255,136,0.15) !important; box-shadow: 0 0 12px #00ff8844 !important; }
+`;
+
+const S = {
+  app: {
+    minHeight: "100vh",
+    background: "linear-gradient(160deg, #020408 0%, #060d1a 40%, #040810 100%)",
+    fontFamily: "'Rajdhani', 'Share Tech Mono', monospace",
+    color: "#c8e6f8",
+    position: "relative",
+    overflow: "hidden",
+  },
+  particles: { position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0 },
+
+  bootScreen: {
+    position: "fixed", inset: 0, display: "flex", flexDirection: "column",
+    alignItems: "center", justifyContent: "center", gap: 16, zIndex: 100,
+  },
+  bootLogo: { fontSize: 64, color: "#00d4ff", animation: "boot-pulse 1s infinite" },
+  bootText: { fontFamily: "'Share Tech Mono', monospace", color: "#00d4ff", letterSpacing: 4, fontSize: 13 },
+  bootBar: { width: 200, height: 2, background: "#0a2040", borderRadius: 2, overflow: "hidden" },
+  bootBarFill: { height: "100%", background: "#00d4ff", animation: "boot-fill 1.5s ease forwards" },
+
+  levelUpOverlay: {
+    position: "fixed", inset: 0, zIndex: 999,
+    background: "rgba(0,8,20,0.85)", display: "flex", alignItems: "center", justifyContent: "center",
+    animation: "levelup-in 3s ease forwards",
+  },
+  levelUpBox: {
+    textAlign: "center", padding: 48,
+    border: "2px solid #00d4ff", borderRadius: 4,
+    background: "linear-gradient(135deg, #020c1a, #040f1e)",
+    boxShadow: "0 0 60px #00d4ff44, inset 0 0 60px #00d4ff08",
+  },
+  levelUpStar: { fontSize: 48, color: "#fbbf24", animation: "star-spin 1.5s linear infinite", display: "block", marginBottom: 8 },
+  levelUpTitle: { fontFamily: "'Share Tech Mono', monospace", fontSize: 13, letterSpacing: 8, color: "#00d4ff", marginBottom: 8 },
+  levelUpNum: { fontSize: 72, fontWeight: 700, color: "#fff", lineHeight: 1, textShadow: "0 0 30px #00d4ff" },
+  levelUpRank: { fontSize: 18, color: "#94a3b8", marginTop: 8, letterSpacing: 2 },
+
+  notif: {
+    position: "fixed", top: 72, left: "50%", transform: "translateX(-50%)", zIndex: 998,
+    padding: "10px 20px", borderRadius: 2, fontWeight: 600, fontSize: 13,
+    background: "#0a1628", border: "1px solid #1e3a5f", color: "#c8e6f8",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.5)", letterSpacing: 0.5, whiteSpace: "nowrap",
+  },
+  notifSuccess: { border: "1px solid #00ff8866", color: "#00ff88", background: "#001a0c" },
+  notifLevelup: { border: "1px solid #fbbf24", color: "#fbbf24", background: "#1a0d00", boxShadow: "0 0 20px #fbbf2433" },
+
+  header: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "12px 20px", borderBottom: "1px solid #0e2038",
+    background: "rgba(4,8,16,0.95)", backdropFilter: "blur(10px)",
+    position: "sticky", top: 0, zIndex: 100,
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
+  hexIcon: { fontSize: 28, color: "#00d4ff", textShadow: "0 0 12px #00d4ff" },
+  sysLabel: { fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#00d4ff99", letterSpacing: 3 },
+  appTitle: { fontSize: 20, fontWeight: 700, color: "#fff", letterSpacing: 3, textShadow: "0 0 12px #00d4ff44" },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  xpMiniBar: { width: 80, height: 3, background: "#0a2040", borderRadius: 2, overflow: "hidden" },
+  xpMiniFill: { height: "100%", background: "linear-gradient(90deg, #00d4ff, #7c3aed)", transition: "width 0.5s ease" },
+  rankBadge: {
+    padding: "2px 8px", border: "1px solid", borderRadius: 2,
+    fontSize: 11, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1,
+  },
+  lvBadge: {
+    padding: "4px 10px", background: "#060f1e", border: "1px solid #1e3a5f",
+    borderRadius: 2, fontSize: 12, fontWeight: 700, color: "#00d4ff",
+    fontFamily: "'Share Tech Mono', monospace",
+  },
+  moreBtn: {
+    padding: "6px 12px", background: "transparent", border: "1px solid #1e3a5f",
+    color: "#94a3b8", cursor: "pointer", fontSize: 16, borderRadius: 2,
+    transition: "all 0.2s", fontFamily: "inherit",
+  },
+
+  moreMenu: {
+    position: "absolute", top: 62, right: 16, zIndex: 200,
+    background: "#040d1a", border: "1px solid #1e3a5f",
+    borderRadius: 4, minWidth: 260, boxShadow: "0 8px 32px rgba(0,0,0,0.7)",
+    overflow: "hidden",
+  },
+  moreMenuTitle: {
+    padding: "10px 16px", fontSize: 10, color: "#2e5a7a",
+    fontFamily: "'Share Tech Mono', monospace", letterSpacing: 3, borderBottom: "1px solid #0e2038",
+  },
+  moreItem: {
+    display: "flex", alignItems: "center", gap: 12, width: "100%",
+    padding: "12px 16px", background: "transparent", border: "none",
+    cursor: "pointer", color: "#c8e6f8", fontFamily: "inherit",
+    borderBottom: "1px solid #0a1a2e", textAlign: "left", transition: "background 0.2s",
+  },
+  moreItemPenalty: { borderLeft: "2px solid #ef4444" },
+  moreIcon: { fontSize: 18, flexShrink: 0 },
+  moreItemLabel: { fontSize: 13, fontWeight: 600, letterSpacing: 0.5 },
+  moreItemSub: { fontSize: 10, color: "#4a6a80", marginTop: 2, fontFamily: "'Share Tech Mono', monospace" },
+
+  body: { display: "flex", height: "calc(100vh - 58px)", overflow: "hidden" },
+
+  sidebar: {
+    width: 230, flexShrink: 0, borderRight: "1px solid #0e2038",
+    background: "rgba(4,8,16,0.8)", padding: "16px 0", overflow: "auto",
+  },
+  sidebarHead: {
+    padding: "0 16px 12px", fontSize: 9, color: "#2e5a7a",
+    fontFamily: "'Share Tech Mono', monospace", letterSpacing: 3,
+    borderBottom: "1px solid #0a1a2e", marginBottom: 4,
+  },
+  listItem: {
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "10px 16px", cursor: "pointer", borderLeft: "2px solid transparent",
+    transition: "all 0.2s", fontSize: 13, fontWeight: 500,
+  },
+  listItemActive: { borderLeftColor: "#00d4ff", background: "rgba(0,212,255,0.08)", color: "#00d4ff" },
+  listItemText: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  listItemRight: { display: "flex", alignItems: "center", gap: 4, marginLeft: 8, flexShrink: 0 },
+  listCount: {
+    background: "#0a1628", border: "1px solid #1e3a5f",
+    borderRadius: 10, padding: "1px 6px", fontSize: 10, color: "#4a6a80",
+    fontFamily: "'Share Tech Mono', monospace",
+  },
+  listEditBtn: {
+    background: "none", border: "none", cursor: "pointer",
+    color: "#2e5a7a", fontSize: 12, padding: "2px 4px", transition: "color 0.2s",
+  },
+  listDelBtn: {
+    background: "none", border: "none", cursor: "pointer",
+    color: "#2e5a7a", fontSize: 11, padding: "2px 4px", transition: "color 0.2s",
+  },
+  editListRow: { padding: "6px 8px", display: "flex", gap: 4 },
+  editListInput: {
+    flex: 1, background: "#040d1a", border: "1px solid #1e3a5f",
+    color: "#c8e6f8", padding: "4px 8px", fontSize: 12, fontFamily: "inherit", borderRadius: 2,
+  },
+  editSaveBtn: {
+    padding: "4px 8px", background: "#00d4ff22", border: "1px solid #00d4ff55",
+    color: "#00d4ff", cursor: "pointer", fontSize: 12, borderRadius: 2,
+  },
+  sidebarDivider: { margin: "8px 0", borderTop: "1px solid #0a1a2e" },
+  addListForm: { padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 },
+  addListInput: {
+    background: "#040d1a", border: "1px solid #1e3a5f", color: "#c8e6f8",
+    padding: "6px 10px", fontSize: 12, fontFamily: "inherit", borderRadius: 2, outline: "none",
+    transition: "border-color 0.2s",
+  },
+  addListConfirm: {
+    flex: 1, padding: "5px", background: "#00d4ff22", border: "1px solid #00d4ff55",
+    color: "#00d4ff", cursor: "pointer", fontSize: 11, fontFamily: "inherit",
+    letterSpacing: 1, borderRadius: 2, fontWeight: 700,
+  },
+  addListCancel: {
+    padding: "5px 8px", background: "#1a0010", border: "1px solid #3a1028",
+    color: "#94a3b8", cursor: "pointer", fontSize: 11, borderRadius: 2,
+  },
+  newListBtn: {
+    display: "block", width: "calc(100% - 16px)", margin: "8px 8px",
+    padding: "8px", background: "transparent", border: "1px dashed #1e3a5f",
+    color: "#2e5a7a", cursor: "pointer", fontSize: 12, fontFamily: "inherit",
+    borderRadius: 2, transition: "all 0.2s", letterSpacing: 0.5,
+  },
+
+  panel: { flex: 1, overflow: "auto", position: "relative" },
+  panelInner: { padding: 24, maxWidth: 780, margin: "0 auto" },
+  panelHeader: {
+    marginBottom: 24, paddingBottom: 16, borderBottom: "1px solid #0e2038", position: "relative",
+  },
+  panelCorner: {
+    position: "absolute", top: 0, right: 0, width: 40, height: 40,
+    borderTop: "2px solid #00d4ff44", borderRight: "2px solid #00d4ff44",
+  },
+  panelTitle: { fontSize: 22, fontWeight: 700, color: "#fff", letterSpacing: 1, marginBottom: 4 },
+  panelSubtitle: { fontSize: 10, color: "#2e5a7a", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 3 },
+
+  questList: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 },
+  questRow: {
+    display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+    background: "#040d1a", border: "1px solid #0e2038", borderRadius: 3,
+    transition: "all 0.2s", cursor: "default",
+  },
+  questNum: { fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: "#2e5a7a", flexShrink: 0 },
+  checkBtn: {
+    width: 22, height: 22, background: "transparent", border: "2px solid #1e3a5f",
+    borderRadius: 3, cursor: "pointer", display: "flex", alignItems: "center",
+    justifyContent: "center", flexShrink: 0, transition: "all 0.2s",
+    animation: "glow-pulse 3s ease infinite",
+  },
+  checkInner: { width: 8, height: 8, background: "#00d4ff44", borderRadius: 1 },
+  questLabel: { flex: 1, fontSize: 14, fontWeight: 500, color: "#c8e6f8" },
+  delQBtn: {
+    background: "none", border: "none", cursor: "pointer", color: "#1e3a5f",
+    fontSize: 13, padding: "2px 4px", transition: "color 0.2s", flexShrink: 0,
+  },
+
+  addQuestRow: { display: "flex", gap: 8 },
+  addQuestInputWrap: {
+    flex: 1, display: "flex", alignItems: "center", gap: 8,
+    background: "#040d1a", border: "1px solid #1e3a5f", borderRadius: 3, padding: "0 12px",
+  },
+  addQuestPlus: { color: "#00d4ff66", fontSize: 14, flexShrink: 0 },
+  addQuestInput: {
+    flex: 1, background: "transparent", border: "none", color: "#c8e6f8",
+    padding: "12px 0", fontSize: 14, fontFamily: "inherit", outline: "none",
+  },
+  addQuestBtn: {
+    padding: "12px 18px", background: "#00d4ff", border: "none",
+    color: "#000", cursor: "pointer", fontSize: 12, fontFamily: "inherit",
+    fontWeight: 700, letterSpacing: 1, borderRadius: 3, transition: "all 0.2s", flexShrink: 0,
+  },
+
+  completedCheck: { color: "#00ff88", fontSize: 18, flexShrink: 0 },
+  completedMeta: { fontSize: 10, color: "#2e5a7a", marginTop: 2, fontFamily: "'Share Tech Mono', monospace" },
+
+  empty: { textAlign: "center", padding: "60px 0", color: "#2e5a7a" },
+  emptyIcon: { fontSize: 48, marginBottom: 16 },
+  emptyTitle: { fontFamily: "'Share Tech Mono', monospace", letterSpacing: 3, fontSize: 12, marginBottom: 8 },
+  emptySub: { fontSize: 13, color: "#1e3a5f" },
+
+  streakRow: { display: "flex", gap: 12, marginBottom: 20 },
+  streakCard: {
+    flex: 1, padding: "20px 16px", background: "#040d1a", border: "1px solid #0e2038",
+    borderRadius: 3, textAlign: "center",
+  },
+  streakNum: { fontSize: 40, fontWeight: 700, color: "#00d4ff", fontFamily: "'Share Tech Mono', monospace" },
+  streakLabel: { fontSize: 9, color: "#2e5a7a", letterSpacing: 3, marginTop: 4, fontFamily: "'Share Tech Mono', monospace" },
+
+  ciNote: { fontSize: 11, color: "#2e5a7a", marginBottom: 16, fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5 },
+
+  histGrid: { display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 6 },
+  dayCell: {
+    padding: "8px 4px", background: "#040d1a", border: "1px solid #0a1a2e",
+    borderRadius: 3, textAlign: "center", transition: "all 0.2s",
+  },
+  dayCellOn: { background: "#001a0c", border: "1px solid #00ff8855" },
+  dayCellMiss: { background: "#1a0004", border: "1px solid #ff000030" },
+  dayCellToday: { border: "1px solid #00d4ff55", boxShadow: "0 0 8px #00d4ff22" },
+  dayLabel: { fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#2e5a7a", marginBottom: 4 },
+  dayIcon: { fontSize: 14, marginBottom: 2 },
+  dayDate: { fontFamily: "'Share Tech Mono', monospace", fontSize: 9, color: "#1e3a5f" },
+
+  profileCard: {
+    display: "flex", gap: 24, padding: 24, background: "#040d1a",
+    border: "1px solid #1e3a5f", borderRadius: 4, marginBottom: 24,
+    boxShadow: "0 0 20px rgba(0,0,0,0.4)",
+  },
+  rankCircle: {
+    width: 80, height: 80, border: "3px solid", borderRadius: "50%",
+    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+  },
+  rankLetter: { fontSize: 36, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace" },
+  profileInfo: { flex: 1 },
+  profileRankLabel: { fontSize: 13, fontWeight: 600, letterSpacing: 2, marginBottom: 4 },
+  profileLevel: { fontSize: 32, fontWeight: 700, color: "#fff", marginBottom: 12 },
+  xpBarOuter: {
+    height: 6, background: "#0a1628", borderRadius: 3, overflow: "hidden",
+    position: "relative", marginBottom: 6,
+  },
+  xpBarInner: { height: "100%", borderRadius: 3, transition: "width 0.5s ease" },
+  xpBarGlow: { position: "absolute", inset: 0, background: "transparent" },
+  xpNums: { fontSize: 11, color: "#4a6a80", fontFamily: "'Share Tech Mono', monospace" },
+
+  roadmapTitle: {
+    fontSize: 10, color: "#2e5a7a", letterSpacing: 4,
+    fontFamily: "'Share Tech Mono', monospace", marginBottom: 12, textAlign: "center",
+  },
+  roadItem: {
+    display: "flex", alignItems: "center", gap: 16, padding: "14px 16px",
+    background: "#040d1a", border: "1px solid #0e2038",
+    borderLeft: "2px solid #1e3a5f", borderRadius: 3, marginBottom: 8, transition: "all 0.2s",
+  },
+  roadItemActive: { background: "#06101e", border: "1px solid #1e3a5f" },
+  roadBadge: {
+    padding: "4px 10px", border: "1px solid", borderRadius: 2,
+    fontSize: 11, fontWeight: 700, fontFamily: "'Share Tech Mono', monospace",
+    flexShrink: 0, letterSpacing: 1,
+  },
+  roadInfo: { flex: 1 },
+  roadLabel: { fontSize: 14, fontWeight: 600, color: "#c8e6f8", marginBottom: 2 },
+  roadCurrent: { fontSize: 9, color: "#00d4ff", letterSpacing: 2, marginLeft: 8, fontFamily: "'Share Tech Mono', monospace" },
+  roadDesc: { fontSize: 11, color: "#4a6a80", fontFamily: "'Share Tech Mono', monospace" },
+
+  xpGuide: {
+    marginTop: 20, padding: 16, background: "#040d1a",
+    border: "1px solid #0e2038", borderRadius: 3,
+  },
+  xpGuideTitle: { fontSize: 9, color: "#2e5a7a", letterSpacing: 3, fontFamily: "'Share Tech Mono', monospace", marginBottom: 12 },
+  xpGuideRow: {
+    display: "flex", justifyContent: "space-between", fontSize: 12,
+    padding: "6px 0", borderBottom: "1px solid #0a1a2e",
+    fontFamily: "'Share Tech Mono', monospace", color: "#4a6a80",
+  },
+
+  penaltyWarning: {
+    padding: "12px 16px", background: "#1a0004", border: "1px solid #ef4444",
+    borderRadius: 3, marginBottom: 16, fontSize: 12, color: "#f87171",
+    fontFamily: "'Share Tech Mono', monospace", letterSpacing: 0.5,
+  },
+  penCard: {
+    padding: 16, background: "#040d1a", border: "1px solid #ef444433",
+    borderRadius: 3, marginBottom: 10, borderLeft: "3px solid #ef4444",
+  },
+  penCardDone: { opacity: 0.5, borderLeftColor: "#00ff88", border: "1px solid #00ff8833" },
+  penDateRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  penDate: { fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: "#f87171" },
+  penEditBtn: {
+    background: "none", border: "none", cursor: "pointer", color: "#4a6a80",
+    fontSize: 11, fontFamily: "inherit", padding: "2px 6px",
+  },
+  penQuest: { fontSize: 14, fontWeight: 600, color: "#c8e6f8", marginBottom: 12, lineHeight: 1.5 },
+  penEditRow: { display: "flex", gap: 6, marginBottom: 10 },
+  penEditInput: {
+    flex: 1, background: "#060b14", border: "1px solid #1e3a5f",
+    color: "#c8e6f8", padding: "6px 10px", fontSize: 13, fontFamily: "inherit",
+    borderRadius: 2, outline: "none",
+  },
+  penEditSave: {
+    padding: "6px 12px", background: "#00d4ff22", border: "1px solid #00d4ff55",
+    color: "#00d4ff", cursor: "pointer", fontSize: 11, fontFamily: "inherit", borderRadius: 2,
+  },
+  penCompleteBtn: {
+    padding: "8px 16px", background: "rgba(0,255,136,0.08)", border: "1px solid #00ff8866",
+    color: "#00ff88", cursor: "pointer", fontSize: 12, fontFamily: "inherit",
+    fontWeight: 700, letterSpacing: 1, borderRadius: 2, transition: "all 0.2s",
+  },
+  penDoneLabel: { fontSize: 12, color: "#00ff88", fontFamily: "'Share Tech Mono', monospace", letterSpacing: 1 },
+};
